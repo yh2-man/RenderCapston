@@ -8,12 +8,14 @@ import GlobalAudioStreams from '../../components/common/GlobalAudioStreams';
 import MicLoopbackPlayer from '../../components/common/MicLoopbackPlayer';
 import DirectMessagePanel from '../../components/dms/DirectMessagePanel'; // Import DM Panel
 import { useFriends } from '../../context/FriendsContext'; // Import useFriends
+import { useWebRTC } from '../../context/WebRTCContext';
 import './AppLayout.css';
 
 const AppLayout = () => {
   const location = useLocation();
   const { activeConversation } = useFriends();
   const isSettingsPage = location.pathname.startsWith('/settings');
+  const { participants, isGlobalMuted } = useWebRTC();
 
   return (
     <div className="app-container">
@@ -25,7 +27,7 @@ const AppLayout = () => {
         </main>
       </div>
       <Footer />
-      <GlobalAudioStreams />
+      <GlobalAudioStreams participants={participants} isGlobalMuted={isGlobalMuted} />
       <MicLoopbackPlayer />
     </div>
   );

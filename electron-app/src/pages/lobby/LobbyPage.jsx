@@ -72,6 +72,7 @@ const LobbyPage = () => {
     };
 
     const handleCreateRoomSuccess = (newlyCreatedRoom) => {
+      console.log('[LobbyPage] handleCreateRoomSuccess called with payload:', JSON.stringify(newlyCreatedRoom, null, 2));
       if (newlyCreatedRoom && newlyCreatedRoom.id) {
         navigate(`/room/${newlyCreatedRoom.id}`);
       } else {
@@ -115,6 +116,8 @@ const LobbyPage = () => {
   }, [isConnected, sendMessage, requestCategories]);
 
   const handleCreateRoom = (newRoomData) => {
+    console.log('[LobbyPage] handleCreateRoom triggered with:', newRoomData);
+
     if (!user) {
       console.error("Cannot create room: User not logged in.");
       return;
@@ -124,30 +127,16 @@ const LobbyPage = () => {
       return;
     }
 
-    // Find the category ID based on the selected category name
-    const selectedCategory = categories.find(catName => catName === newRoomData.category);
-    let categoryId = null;
-    if (selectedCategory) {
-        // This assumes categories state holds objects with id and name, but it only holds names.
-        // We need to fetch categories with IDs from the server.
-        // For now, we'll pass the name and let the server resolve it, or update categories state.
-        // For now, let's assume newRoomData.categoryId is passed directly from modal if selected.
-        // Or, we need to update the categories state to store full category objects.
-        // For simplicity, let's assume the modal passes categoryId directly.
-        // If newRoomData.category is a name, we need to map it to an ID.
-        // Let's assume the modal passes the category name, and we need to find its ID.
-        const categoryObject = categories.find(cat => cat.name === newRoomData.category); // Assuming categories state stores objects
-        categoryId = categoryObject ? categoryObject.id : null;
-    }
-
     const payload = {
       name: newRoomData.roomName,
-      categoryId: newRoomData.categoryId, // Assuming modal provides categoryId
+      categoryId: newRoomData.categoryId, // Use the ID passed directly from the modal
       maxParticipants: newRoomData.maxParticipants,
       userId: user.id,
-      isPrivate: newRoomData.isPrivate || false, // Default to false
-      roomType: 'group', // Always 'group' for lobby creation
+      isPrivate: newRoomData.isPrivate || false,
+      roomType: 'group',
     };
+
+    console.log('[LobbyPage] Calling createRoom with payload:', payload);
     createRoom(sendMessage, payload);
     setIsModalOpen(false);
   };

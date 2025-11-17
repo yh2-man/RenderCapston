@@ -17,35 +17,58 @@ export function AuthProvider({ children }) {
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
     const { addNotification } = useNotification();
-    const { isConnected, sendMessage, addMessageListener, removeMessageListener } = useWebSocketClient('ws://localhost:3001');
+    const { isConnected, sendMessage, addMessageListener, removeMessageListener, disconnect, connect } = useWebSocketClient('ws://localhost:3001');
     const keepLoggedInRef = useRef(true); // Ref to store login persistence preference
 
-    // Startup effect
+    // Effect 1: Runs once on mount to get token and initiate connection
     useEffect(() => {
         const bootstrapAuth = async () => {
             try {
                 const storedToken = await window.electron.store.get('token');
                 if (storedToken) {
-                    const response = await fetch('http://localhost:3001/api/me', {
-                        headers: { 'Authorization': `Bearer ${storedToken}` },
-                    });
-                    if (response.ok) {
-                        const userData = await response.json();
-                        setUser(userData);
-                        setToken(storedToken);
-                    } else {
-                        await window.electron.store.delete('token');
-                    }
+                    setToken(storedToken);
+                    connect(); // Initiate connection
+                } else {
+                    setLoading(false); // No token, not loading.
                 }
             } catch (error) {
                 console.error("Failed to bootstrap auth:", error);
+                setLoading(false);
             }
-            setLoading(false);
         };
         bootstrapAuth();
-    }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Should only run once.
 
-    // WebSocket message listeners effect
+    // Effect 2: Runs when token and connection are ready
+    useEffect(() => {
+        if (token && isConnected) {
+            const authenticateAndLoad = async () => {
+                // 1. Authenticate WebSocket
+                sendMessage({ type: 'reauthenticate', payload: { token } });
+
+                // 2. Fetch user profile
+                const response = await fetch('http://localhost:3001/api/me', {
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+
+                if (response.ok) {
+                    const userData = await response.json();
+                    setUser(userData);
+                } else {
+                    // Token is invalid, clear it
+                    await window.electron.store.delete('token');
+                    setUser(null);
+                    setToken(null);
+                }
+                setLoading(false); // Finish loading
+            };
+            authenticateAndLoad();
+        }
+    }, [token, isConnected, sendMessage]);
+
+
+    // Effect 3: Manages WebSocket message listeners
     useEffect(() => {
         if (!isConnected) return;
 
@@ -57,7 +80,7 @@ export function AuthProvider({ children }) {
             addNotification('로그인 성공!', 'success');
             setUser(data.user);
             setToken(data.token);
-            if (keepLoggedInRef.current) { // Check the ref before saving
+            if (keepLoggedInRef.current) {
                 await window.electron.store.set('token', data.token);
             }
             navigate('/lobby');
@@ -82,28 +105,33 @@ export function AuthProvider({ children }) {
         };
 
         Object.entries(listeners).forEach(([type, handler]) => addMessageListener(type, handler));
-        
-        // If we have a token on startup, try to re-authenticate the websocket with it
-        if (token) {
-            sendMessage({ type: 'reauthenticate', payload: { token: token } });
-        }
 
         return () => {
             Object.entries(listeners).forEach(([type, handler]) => removeMessageListener(type, handler));
         };
-    }, [isConnected, addMessageListener, removeMessageListener, navigate, addNotification, token, sendMessage]);
-
+    }, [isConnected, addMessageListener, removeMessageListener, navigate, addNotification]);
+    
     const loginAndSetPersistence = useCallback((email, password, keepLoggedIn) => {
         keepLoggedInRef.current = keepLoggedIn;
-        sendMessage({ type: 'login', payload: { email, password } });
-    }, [sendMessage]);
+        connect(); // Ensure connection is active before sending message
+        // A small delay might be needed if the connection is not instant
+        setTimeout(() => {
+            sendMessage({ type: 'login', payload: { email, password } });
+        }, 100); // 100ms delay
+    }, [sendMessage, connect]);
 
     const logout = useCallback(async () => {
+        // Full cleanup of all session-related resources
+        if (disconnect) {
+            disconnect();
+        }
+        
         await window.electron.store.delete('token');
         setUser(null);
         setToken(null);
+        setCurrentRoom(null); // Also clear the current room
         navigate('/');
-    }, [navigate]);
+    }, [navigate, disconnect]);
 
     const updateUser = useCallback((updatedFields) => {
         setUser(prev => ({ ...prev, ...updatedFields }));
@@ -112,6 +140,7 @@ export function AuthProvider({ children }) {
     const value = useMemo(() => ({
         user,
         token,
+        loading, // Expose loading state
         currentRoom, // Expose currentRoom
         setCurrentRoom, // Expose setCurrentRoom
         isConnected,
@@ -121,7 +150,9 @@ export function AuthProvider({ children }) {
         logout,
         updateUser,
         loginAndSetPersistence, // Expose the new login function
-    }), [user, token, currentRoom, isConnected, sendMessage, addMessageListener, removeMessageListener, logout, updateUser, loginAndSetPersistence]);
+        disconnect, // Expose disconnect for good measure
+        connect, // Expose connect
+    }), [user, token, loading, currentRoom, isConnected, sendMessage, addMessageListener, removeMessageListener, logout, updateUser, loginAndSetPersistence, disconnect, connect]);
 
     if (loading) {
         return <div>Loading...</div>;

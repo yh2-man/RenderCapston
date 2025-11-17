@@ -1,70 +1,97 @@
 import { useState, useEffect, useRef } from 'react';
 
-const useVoiceActivity = ({ stream, threshold = 20, interval = 100 }) => {
+export function useVoiceActivity(stream, options) {
+    // Use default empty object for options if not provided, and provide default values
+    const { onSpeaking, onStoppedSpeaking, threshold = 1, delay = 150 } = options || {};
     const [isSpeaking, setIsSpeaking] = useState(false);
-    const animationFrameRef = useRef();
+    
+    // Use refs to hold values that change within the loop but shouldn't re-trigger the effect
+    const animationFrame = useRef(null);
+    const speakingTimeout = useRef(null);
     const isSpeakingRef = useRef(false);
-    const speakingTimeoutRef = useRef(null); // Ref for the turn-off delay timer
 
     useEffect(() => {
+        // Update the ref whenever the state changes
+        isSpeakingRef.current = isSpeaking;
+    }, [isSpeaking]);
+
+    useEffect(() => {
+        console.log('[useVoiceActivity] Processing stream:', stream);
         if (!stream || !stream.getAudioTracks().length || stream.getAudioTracks().every(t => !t.enabled)) {
             if (isSpeakingRef.current) {
-                isSpeakingRef.current = false;
                 setIsSpeaking(false);
+                onStoppedSpeaking?.();
             }
             return;
         }
 
-        const audioContext = new AudioContext();
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 512;
-        analyser.smoothingTimeConstant = 0.1;
+        let audioContext;
+        let analyser;
+        let source;
 
-        const source = audioContext.createMediaStreamSource(stream);
-        source.connect(analyser);
+        try {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            analyser.smoothingTimeConstant = 0.5;
+            analyser.fftSize = 512;
+            source = audioContext.createMediaStreamSource(stream);
+            source.connect(analyser);
 
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        let lastCheck = Date.now();
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-        const checkVolume = () => {
-            const now = Date.now();
-            if (now - lastCheck > interval) {
-                lastCheck = now;
-                analyser.getByteFrequencyData(dataArray);
-                const average = dataArray.reduce((acc, val) => acc + val, 0) / dataArray.length;
+            const checkVolume = () => {
+                analyser.getByteTimeDomainData(dataArray);
+                let sumSquares = 0.0;
+                for (const amplitude of dataArray) {
+                    const val = (amplitude / 128.0) - 1.0; // Normalize to -1.0 to 1.0
+                    sumSquares += val * val;
+                }
+                const rms = Math.sqrt(sumSquares / dataArray.length);
+                const volume = rms * 100; // Scale to a 0-100 range
 
-                if (average > threshold) {
+                if (volume > threshold) {
                     // --- User is speaking ---
-                    clearTimeout(speakingTimeoutRef.current);
-                    speakingTimeoutRef.current = null;
+                    clearTimeout(speakingTimeout.current);
+                    speakingTimeout.current = null;
                     if (!isSpeakingRef.current) {
-                        isSpeakingRef.current = true;
                         setIsSpeaking(true);
+                        onSpeaking?.();
                     }
                 } else {
                     // --- User is not speaking ---
-                    if (isSpeakingRef.current && !speakingTimeoutRef.current) {
-                        speakingTimeoutRef.current = setTimeout(() => {
-                            isSpeakingRef.current = false;
+                    if (isSpeakingRef.current && !speakingTimeout.current) {
+                        speakingTimeout.current = setTimeout(() => {
                             setIsSpeaking(false);
-                            speakingTimeoutRef.current = null;
-                        }, 100); // 100ms delay before turning off
+                            onStoppedSpeaking?.();
+                        }, delay);
                     }
                 }
-            }
-            animationFrameRef.current = requestAnimationFrame(checkVolume);
-        };
+                animationFrame.current = requestAnimationFrame(checkVolume);
+            };
 
-        checkVolume();
+            animationFrame.current = requestAnimationFrame(checkVolume);
+
+        } catch (error) {
+            console.error('Error setting up audio processor for voice activity:', error);
+        }
 
         return () => {
-            cancelAnimationFrame(animationFrameRef.current);
-            clearTimeout(speakingTimeoutRef.current); // Clear timeout on cleanup
-            source.disconnect();
+            if (animationFrame.current) {
+                cancelAnimationFrame(animationFrame.current);
+            }
+            if (speakingTimeout.current) {
+                clearTimeout(speakingTimeout.current);
+            }
+            if (source) {
+                source.disconnect();
+            }
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+            }
         };
-    }, [stream, threshold, interval]);
+    }, [stream, threshold, delay, onSpeaking, onStoppedSpeaking]);
 
-    return isSpeaking;
-};
+    return { isSpeaking };
+}
 
 export default useVoiceActivity;

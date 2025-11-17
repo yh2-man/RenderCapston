@@ -65,6 +65,7 @@ async function handleGetRooms(ws, payload, wss, rooms) {
 
 
 async function handleCreateRoom(ws, payload, wss, rooms) {
+    console.log('[Room-Handler] handleCreateRoom called with payload:', payload);
     const { name, categoryId, maxParticipants, userId, isPrivate, roomType = 'group' } = payload;
     // For group rooms, name is required. For DM rooms, name can be null.
     if (!userId || !maxParticipants) {
@@ -119,7 +120,7 @@ async function handleCreateRoom(ws, payload, wss, rooms) {
     }
 }
 
-async function handleJoinRoom(ws, payload, wss, rooms) { // Add wss
+async function handleJoinRoom(ws, payload, wss, rooms, userRoomMap) { // Add userRoomMap
     const { roomId, userId } = payload;
     
     try {
@@ -152,44 +153,35 @@ async function handleJoinRoom(ws, payload, wss, rooms) { // Add wss
             return send(ws, 'error', { message: 'Room is full.' });
         }
 
-        // If user is already in another room, make them leave first
-        if (ws.roomId && ws.roomId !== roomId) {
-            await handleLeaveRoom(ws, {}, wss, rooms); // Pass wss, await it
+        // --- REORDERED LOGIC TO PREVENT RACE CONDITION ---
+
+        // 1. Prepare all necessary data first
+        const joiningUserResult = await db.query('SELECT id, username, tag, profile_image_url FROM users WHERE id = $1', [userId]);
+        const joiningUser = joiningUserResult.rows[0];
+        if (joiningUser.profile_image_url) {
+            joiningUser.profile_image_url = `http://localhost:3001${joiningUser.profile_image_url}`;
         }
 
-        ws.roomId = roomId;
-        ws.userId = userId;
+        // Temporarily add the new user to the room to build the full participant list
         room.add(ws);
+        ws.roomId = roomId; // Set these early for the participantPromises
+        ws.userId = userId;
 
-        // Notify lobby of participant count change
-        broadcastToLobby(wss, 'room-updated', { roomId, participantCount: room.size });
-
-        // Notify other clients in the room
-        // Fetch the username for the joining user to send a complete user object
-        const joiningUserResult = await db.query('SELECT username FROM users WHERE id = $1', [userId]);
-        const joiningUsername = joiningUserResult.rows[0]?.username || 'Unknown User';
-        const joiningUser = { id: userId, username: joiningUsername };
-
-        room.forEach(client => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-                send(client, 'user-joined', { user: joiningUser });
+        const participantPromises = Array.from(room).map(async client => {
+            if (client.userId) {
+                const userResult = await db.query('SELECT id, username, tag, profile_image_url FROM users WHERE id = $1', [client.userId]);
+                const user = userResult.rows[0];
+                if (user && user.profile_image_url) {
+                    user.profile_image_url = `http://localhost:3001${user.profile_image_url}`;
+                }
+                return user;
             }
+            return null;
         });
-
-        send(ws, 'joined-room', { roomId });
-
-        // Prepare and send room-info to the newly joined client
-        const currentParticipants = await Promise.all(Array.from(room).map(async client => {
-            let username = client.username;
-            if (!username && client.userId) {
-                const userResult = await db.query('SELECT username FROM users WHERE id = $1', [client.userId]);
-                username = userResult.rows[0]?.username || 'Unknown User';
-            }
-            return {
-                id: client.userId,
-                username: username,
-            };
-        }));
+        const currentParticipants = (await Promise.all(participantPromises)).filter(p => p !== null);
+        
+        // Remove the user again before the final state update to avoid double-adding issues if logic changes
+        room.delete(ws);
 
         const roomInfoPayload = {
             room: {
@@ -204,7 +196,26 @@ async function handleJoinRoom(ws, payload, wss, rooms) { // Add wss
             },
             participants: currentParticipants,
         };
+
+        // 2. Officially add user to the room state
+        ws.roomId = roomId;
+        ws.userId = userId;
+        userRoomMap.set(userId, roomId);
+        room.add(ws);
+        
+        // 3. Send room-info to the NEWLY joined client FIRST
         send(ws, 'room-info', roomInfoPayload);
+        send(ws, 'joined-room', { roomId }); // Also confirm join
+
+        // 4. THEN, notify other clients in the room
+        room.forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+                send(client, 'user-joined', { user: joiningUser });
+            }
+        });
+
+        // 5. Finally, notify the lobby of the participant count change
+        broadcastToLobby(wss, 'room-updated', { roomId, participantCount: room.size });
 
         console.log(`User ${userId} joined room ${roomId}. Current participants: ${room.size}`);
 
@@ -214,7 +225,7 @@ async function handleJoinRoom(ws, payload, wss, rooms) { // Add wss
     }
 }
 
-async function handleLeaveRoom(ws, payload, wss, rooms) {
+async function handleLeaveRoom(ws, payload, wss, rooms, userRoomMap) { // Add userRoomMap
     const { roomId, userId } = ws;
     if (!roomId) return;
 
@@ -312,6 +323,7 @@ async function handleLeaveRoom(ws, payload, wss, rooms) {
         }
     }
     ws.roomId = null;
+    userRoomMap.delete(userId); // Remove from userRoomMap
 }
 
 async function handleChatMessage(ws, payload, wss, rooms) {
@@ -357,35 +369,34 @@ async function handleChatMessage(ws, payload, wss, rooms) {
     }
 }
 
-function handleWebRTCSignaling(ws, payload, wss, rooms) {
-    console.log(`[DEBUG] Server: handleWebRTCSignaling called. Type: ${payload.type}, Sender: ${ws.userId}, Target: ${payload.payload.targetUserId}`); // Updated log
-    const { targetUserId, ...signalingData } = payload.payload; // Corrected access
-    const senderId = ws.userId; // The sender is the current WebSocket's user
+function handleWebRTCSignaling(ws, data, wss, rooms) {
+    const { type, payload } = data;
+    const { targetUserId, ...signalingData } = payload;
+    const senderId = ws.userId;
 
     if (!targetUserId || !senderId) {
-        console.error('WebRTC signaling: targetUserId or senderId is missing.');
+        console.error('[WebRTC Signaling] Error: targetUserId or senderId is missing.', { targetUserId, senderId });
         return;
     }
 
-    // Find the target client in the same room
     let targetClient = null;
-    if (ws.roomId) {
-        const room = rooms.get(ws.roomId);
-        if (room) {
-            room.forEach(client => {
-                if (client.userId === targetUserId) {
-                    targetClient = client;
-                }
-            });
+    for (const client of wss.clients) {
+        // --- DETAILED DEBUG LOG ---
+        console.log(`[WebRTC Signaling] Searching... Target: ${targetUserId} (type: ${typeof targetUserId}), Checking client: ${client.userId} (type: ${typeof client.userId}) in room: ${client.roomId}`);
+        // --- END DEBUG LOG ---
+
+        // Ensure both are treated as the same type for comparison
+        if (String(client.userId) === String(targetUserId) && String(client.roomId) === String(ws.roomId)) {
+            targetClient = client;
+            break;
         }
     }
 
     if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-        // Relay the signaling message to the target client
-        send(targetClient, payload.type, { ...signalingData, senderId });
+        console.log(`[WebRTC Signaling] Success: Found target ${targetUserId}. Relaying ${type} from ${senderId}.`);
+        send(targetClient, type, { ...signalingData, senderId });
     } else {
-        console.warn(`WebRTC signaling: Target client ${targetUserId} not found or not open.`);
-        // Optionally, send an error back to the sender
+        console.warn(`[WebRTC Signaling] Failure: Target client ${targetUserId} not found or not open in room ${ws.roomId}.`);
         send(ws, 'error', { message: `Target user ${targetUserId} is not available for WebRTC signaling.` });
     }
 }
@@ -478,6 +489,41 @@ async function handleDeleteMessage(ws, payload, wss, rooms) {
     }
 }
 
+async function handleMuteStatusChanged(ws, payload, wss, rooms) {
+    const { userId, isMuted, targetUserId } = payload;
+    const senderId = ws.userId;
+    const { roomId } = ws;
+
+    if (!roomId || userId === undefined || isMuted === undefined) {
+        return; // Invalid payload
+    }
+
+    // If a targetUserId is specified, send only to that user.
+    if (targetUserId) {
+        for (const client of wss.clients) {
+            if (String(client.userId) === String(targetUserId) && String(client.roomId) === String(roomId)) {
+                send(client, 'mute-status-changed', { userId, isMuted, senderId });
+                break;
+            }
+        }
+    } else {
+        // Otherwise, broadcast to the entire room.
+        const room = rooms.get(roomId);
+        if (room) {
+            room.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                    send(client, 'mute-status-changed', { userId, isMuted, senderId });
+                }
+            });
+        }
+    }
+}
+
+// This message is sent by the client but requires no server-side action.
+// We add an empty handler to prevent "No handler found" errors.
+function handleStreamIdMap() {
+    // Do nothing.
+}
 module.exports = {
     handleGetRooms,
     handleCreateRoom,
@@ -487,5 +533,7 @@ module.exports = {
     handleWebRTCSignaling,
     handleGetChatHistory, // Export the new handler
     handleDeleteMessage,
-    handleGetCategories
+    handleGetCategories,
+    handleMuteStatusChanged,
+    handleStreamIdMap,
 };

@@ -13,7 +13,7 @@ export const FriendsProvider = ({ children }) => {
     const [unreadMessages, setUnreadMessages] = useState({}); // Store unread message counts by friend ID
     const [activeConversation, setActiveConversation] = useState(null); // ID of the friend in the active DM
 
-    const { isConnected, sendMessage, addMessageListener, removeMessageListener } = useAuth();
+    const { user, isConnected, sendMessage, addMessageListener, removeMessageListener } = useAuth();
 
     // Ref to hold the current active conversation to avoid re-running the main effect
     const activeConversationRef = useRef(activeConversation);
@@ -22,7 +22,7 @@ export const FriendsProvider = ({ children }) => {
     }, [activeConversation]);
 
     useEffect(() => {
-        if (!isConnected) return;
+        if (!isConnected || !user) return;
 
         const handleFriendsList = (data) => {
             setFriends(data.accepted || []);
@@ -100,7 +100,7 @@ export const FriendsProvider = ({ children }) => {
         return () => {
             Object.entries(listeners).forEach(([type, handler]) => removeMessageListener(type, handler));
         };
-    }, [isConnected, sendMessage, addMessageListener, removeMessageListener]);
+    }, [isConnected, user, sendMessage, addMessageListener, removeMessageListener]);
 
     const sendFriendRequest = (fullTag) => sendMessage({ type: 'friend-request', payload: { fullTag } });
     const acceptFriendRequest = (requesterId) => sendMessage({ type: 'accept-friend-request', payload: { requesterId } });

@@ -9,28 +9,39 @@ const AudioStream = ({ stream, isMuted }) => {
         }
     }, [stream]);
 
-    return <audio ref={audioRef} autoPlay playsInline muted={isMuted} />;
+    // The `muted` attribute's presence means true. It must be absent for audio to play.
+    // We only add the muted property to the element if isMuted is actually true.
+    const audioProps = {
+        ref: audioRef,
+        autoPlay: true,
+        playsInline: true,
+    };
+
+    if (isMuted) {
+        audioProps.muted = true;
+    }
+
+    return <audio {...audioProps} />;
 };
 
-const GlobalAudioStreams = ({ remoteStreams, isGlobalMuted }) => {
-    // remoteStreams is an object: { userId: { stream, isMuted } }
-    // Add a guard clause to handle null or undefined remoteStreams
-    const streams = Object.entries(remoteStreams || {});
+const GlobalAudioStreams = ({ participants, isGlobalMuted }) => {
+    // participants is an object: { userId: { stream, user, isMuted } }
+    const streams = Object.entries(participants || {});
 
     return (
         <div className="global-audio-streams" style={{ display: 'none' }}>
-            {streams.map(([userId, streamInfo]) => {
-                if (!streamInfo || !streamInfo.stream) {
+            {streams.map(([userId, participantInfo]) => {
+                if (!participantInfo || !participantInfo.stream) {
                     return null;
                 }
-                // streamInfo.isMuted is the individual mute status from the sender
+                // participantInfo.isMuted is the individual mute status from the sender
                 // isGlobalMuted is the local user's choice to mute all incoming audio
-                const isEffectivelyMuted = isGlobalMuted || streamInfo.isMuted;
+                const isEffectivelyMuted = isGlobalMuted || participantInfo.isMuted;
 
                 return (
                     <AudioStream
                         key={userId}
-                        stream={streamInfo.stream}
+                        stream={participantInfo.stream}
                         isMuted={isEffectivelyMuted}
                     />
                 );

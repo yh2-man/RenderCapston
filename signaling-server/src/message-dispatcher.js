@@ -13,6 +13,8 @@ const {
     handleGetChatHistory,
     handleDeleteMessage,
     handleGetCategories,
+    handleMuteStatusChanged,
+    handleSpeakingStatusChanged,
 } = require('./handlers/room-handlers.js');
 const {
     handleFriendRequest,
@@ -58,9 +60,13 @@ const messageHandlers = {
     'offer': authenticateToken(handleWebRTCSignaling),
     'answer': authenticateToken(handleWebRTCSignaling),
     'ice-candidate': authenticateToken(handleWebRTCSignaling),
+    'stream-id-map': authenticateToken(handleWebRTCSignaling),
+    'mute-status-changed': authenticateToken(require('./handlers/room-handlers.js').handleMuteStatusChanged),
+    'speaking-start': authenticateToken((ws, _, wss, rooms) => handleSpeakingStatusChanged(ws, { isSpeaking: true }, wss, rooms)),
+    'speaking-stop': authenticateToken((ws, _, wss, rooms) => handleSpeakingStatusChanged(ws, { isSpeaking: false }, wss, rooms)),
 };
 
-function dispatchMessage(ws, message, wss, rooms) {
+function dispatchMessage(ws, message, wss, rooms, userRoomMap) {
     let data;
     try {
         const messageStr = message.toString();
@@ -72,16 +78,26 @@ function dispatchMessage(ws, message, wss, rooms) {
 
     const handler = messageHandlers[data.type];
     if (handler) {
+        const webrtcSignalTypes = ['offer', 'answer', 'ice-candidate', 'stream-id-map'];
         const payloadExpectedHandlers = [
             'login', 'signup', 'update-profile', 'verify-email', 'get-user-profile',
             'friend-request', 'get-friends-list', 'accept-friend-request', 'decline-friend-request', 'remove-friend', 'direct-message',
             'get-rooms', 'create-room', 'join-room', 'leave-room', 'chat-message', 'get-chat-history', 'delete-message', 'get-categories',
-            'stream-id-map', 'reauthenticate'
+            'reauthenticate'
         ];
-
-        if (payloadExpectedHandlers.includes(data.type)) {
-            handler(ws, data.payload, wss, rooms);
+        
+        if (webrtcSignalTypes.includes(data.type)) {
+            // Pass the full data object for WebRTC signals
+            handler(ws, data, wss, rooms);
+        } else if (payloadExpectedHandlers.includes(data.type)) {
+            // Pass only the payload for other handlers
+            if (['join-room', 'leave-room'].includes(data.type)) {
+                handler(ws, data.payload, wss, rooms, userRoomMap);
+            } else {
+                handler(ws, data.payload, wss, rooms);
+            }
         } else {
+            // For handlers that don't expect a payload property
             handler(ws, data, wss, rooms);
         }
     } else {

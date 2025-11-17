@@ -31,6 +31,16 @@ export const useWebSocketClient = (url) => {
         }
     }, []);
 
+    const disconnect = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+        }
+        if (ws.current) {
+            ws.current.shouldReconnect = false; // Prevent the onclose handler from reconnecting
+            ws.current.close();
+        }
+    }, []);
+
     const connect = useCallback(() => {
         if (!url) return;
         // Clear any existing reconnect timer before attempting a new connection
@@ -94,14 +104,11 @@ export const useWebSocketClient = (url) => {
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
             }
-            // To ensure the WebSocket connection persists across development hot-reloads and
-            // StrictMode re-renders, we don't close the connection here. We just prevent
-            // the `onclose` handler from attempting to reconnect after a manual cleanup.
-            if (ws.current) {
-                ws.current.shouldReconnect = false;
-            }
+            // The manual `disconnect` function is now responsible for permanent closure.
+            // We no longer set `shouldReconnect = false` here, to allow for auto-reconnect
+            // if the server drops the connection for reasons other than a manual logout.
         };
     }, [connect]); // useEffect depends on the stable 'connect' function
 
-    return { isConnected, sendMessage, addMessageListener, removeMessageListener };
+    return { isConnected, sendMessage, addMessageListener, removeMessageListener, disconnect, connect };
 };

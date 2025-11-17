@@ -20,12 +20,12 @@ const Header = () => {
     <header className="app-header">
       <div className="header-section header-left">
         <span className="header-logo" onClick={handleLogoClick}>
-          Voice App
+          OurChat
         </span>
       </div>
       <div className="header-section header-center">
         <div className="header-ad-space">
-          (광고 영역)
+          {/* Ad content goes here */}
         </div>
       </div>
       <div className="header-section header-right">

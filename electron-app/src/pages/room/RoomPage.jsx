@@ -1,32 +1,36 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { useProfiles } from '../../context/ProfileContext';
 import { useWebRTC } from '../../context/WebRTCContext';
-import useVoiceActivity from '../../hooks/useVoiceActivity'; // Import the new hook
+import useVoiceActivity from '../../hooks/useVoiceActivity';
 import RoomHeaderCard from '../../components/room/RoomHeaderCard';
 import ChatPanel from '../../components/room/ChatPanel';
 import Button from '../../components/common/Button';
-import GlobalAudioStreams from '../../components/common/GlobalAudioStreams'; // Import the new component
+import GlobalAudioStreams from '../../components/common/GlobalAudioStreams';
 import './RoomPage.css';
 
-// Helper component to render each participant's media and profile
-const ParticipantMedia = ({ participant, profile, isSpeaking, isMuted }) => {
-  const avatarUrl = profile?.profile_image_url
-    ? `http://localhost:3001${profile.profile_image_url}`
-    : null;
+// Updated component to work with the new participants object structure
+const ParticipantMedia = ({ participant }) => {
+  const { user, stream, isMuted, isSpeaking } = participant;
+
+  // This check is crucial because the user object might not be available instantly
+  if (!user) {
+    return null; // Or a placeholder
+  }
+
+  const avatarUrl = user.profile_image_url || null;
 
   return (
     <div className={`participant-card ${isSpeaking && !isMuted ? 'speaking' : ''}`}>
       <div className="profile-avatar">
         {avatarUrl ? (
-          <img src={avatarUrl} alt={participant.username} className="avatar-img" />
+          <img src={avatarUrl} alt={user.username} className="avatar-img" />
         ) : (
-          <div className="avatar-placeholder">{participant.username.charAt(0)}</div>
+          <div className="avatar-placeholder">{user.username.charAt(0)}</div>
         )}
         {isMuted && <div className="mute-indicator">🔇</div>}
       </div>
-      <div className="username-display">{participant.username}</div>
+      <div className="username-display">{user.username}</div>
     </div>
   );
 };
@@ -34,95 +38,45 @@ const ParticipantMedia = ({ participant, profile, isSpeaking, isMuted }) => {
 const RoomPage = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
-  const { user, currentRoom, sendMessage, addMessageListener, removeMessageListener } = useAuth();
-  const { profiles, getProfile } = useProfiles();
-  const { joinRoom, leaveRoom, localStream, remoteStreams, setLocalAudioMuted, isGlobalMuted, setIsGlobalMuted } = useWebRTC();
+  const { user, currentRoom, loading, sendMessage, addMessageListener, removeMessageListener } = useAuth();
+  
+  // Data now comes from useWebRTC, which has the unified state
+  const { joinRoom, leaveRoom, participants, setLocalAudioMuted, isGlobalMuted, setIsGlobalMuted, isLocalUserSpeaking } = useWebRTC();
 
-  const [participants, setParticipants] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
   const [isMuted, setIsMuted] = useState(false);
-  const [speakingState, setSpeakingState] = useState({}); // For remote speakers
-
-  // Use the hook for the local user's stream
-  const isLocalUserSpeaking = useVoiceActivity({ stream: localStream });
-
-  // Effect to join the room when the component mounts
+  
+  // Effect to join the room, now aware of auth loading state
   useEffect(() => {
+    if (loading) {
+      return; // Wait for authentication to complete
+    }
     if (user && roomId) {
       joinRoom(roomId);
     } else {
+      // If auth is done and there's still no user, redirect.
       navigate('/lobby');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, roomId, navigate]);
+  }, [user, roomId, loading, navigate]);
 
-  // Effect for handling speaking status updates
+  // Effect for chat, mostly unchanged
   useEffect(() => {
-    const handleSpeakingStatus = (payload) => {
-      setSpeakingState(prev => ({ ...prev, [payload.userId]: payload.speaking }));
-    };
-    addMessageListener('speaking-status', handleSpeakingStatus);
-    return () => removeMessageListener('speaking-status', handleSpeakingStatus);
-  }, [addMessageListener, removeMessageListener]);
-
-  // Effect for handling participants list
-  useEffect(() => {
-    if (!user) return;
-
-    const handleRoomInfo = (payload) => {
-      setParticipants(payload.participants || []);
-    };
-
-    const handleUserJoined = (payload) => {
-      // Add participant only if they are not already in the list
-      setParticipants(prev => 
-        prev.find(p => p.id === payload.user.id) ? prev : [...prev, payload.user]
-      );
-    };
-
-    const handleUserLeft = (payload) => {
-      setParticipants(prev => prev.filter(p => p.id !== payload.userId));
-    };
-
-    addMessageListener('room-info', handleRoomInfo);
-    addMessageListener('user-joined', handleUserJoined);
-    addMessageListener('user-left', handleUserLeft);
-
-    return () => {
-      removeMessageListener('room-info', handleRoomInfo);
-      removeMessageListener('user-joined', handleUserJoined);
-      removeMessageListener('user-left', handleUserLeft);
-    };
-
-  }, [user, addMessageListener, removeMessageListener]);
-
-  // Effect for chat message listeners and history
-  useEffect(() => {
-    if (!user || !roomId) return;
+    if (loading || !user || !roomId) return;
 
     sendMessage({ type: 'get-chat-history', payload: { roomId } });
 
     const handleNewMessage = (payload) => {
-      setChatMessages(prevMessages => [...prevMessages, { ...payload, content: payload.content || payload.message }]); // Ensure content is used
-      if (payload.userId && !profiles[payload.userId]) {
-        getProfile(payload.userId);
-      }
+      setChatMessages(prev => [...prev, payload]);
     };
-
     const handleChatHistory = (payload) => {
-      setChatMessages(payload.messages.map(msg => ({ ...msg, content: msg.content || msg.message }))); // Ensure content is used
-      payload.messages.forEach(msg => {
-        if (msg.userId && !profiles[msg.userId]) {
-          getProfile(msg.userId);
-        }
-      });
+      setChatMessages(payload.messages || []);
     };
-
     const handleMessageDeleted = (payload) => {
-        setChatMessages(prevMessages =>
-            prevMessages.map(msg =>
+        setChatMessages(prev =>
+            prev.map(msg =>
                 msg.id === payload.messageId
-                    ? { ...msg, deletedAt: new Date().toISOString() } // Mark as deleted
+                    ? { ...msg, deleted_at: new Date().toISOString(), content: '삭제된 메시지입니다.' }
                     : msg
             )
         );
@@ -137,20 +91,17 @@ const RoomPage = () => {
       removeMessageListener('chat-history', handleChatHistory);
       removeMessageListener('message-deleted', handleMessageDeleted);
     };
-  }, [user, roomId, sendMessage, addMessageListener, removeMessageListener, profiles, getProfile]);
+  }, [user, roomId, loading, sendMessage, addMessageListener, removeMessageListener]);
 
-  useEffect(() => {
-    participants.forEach(p => getProfile(p.id));
-  }, [participants, getProfile]);
 
   const handleLeaveRoom = () => {
     leaveRoom();
     navigate('/lobby');
   };
 
-  const handleSendMessage = (content) => { // Changed 'message' to 'content'
+  const handleSendMessage = (content) => {
     if (user && roomId && content.trim()) {
-      sendMessage({ type: 'chat-message', payload: { roomId, userId: user.id, content } }); // Changed 'message' to 'content'
+      sendMessage({ type: 'chat-message', payload: { roomId, userId: user.id, content } });
     }
   };
 
@@ -178,15 +129,8 @@ const RoomPage = () => {
 
   return (
     <div className="room-content-wrapper">
-      {/* Render the GlobalAudioStreams component to handle remote audio */}
-      <GlobalAudioStreams remoteStreams={remoteStreams} isGlobalMuted={isGlobalMuted} />
-
       <RoomHeaderCard 
         title={currentRoom.name} 
-        roomType={currentRoom.roomType}
-        isPrivate={currentRoom.isPrivate}
-        categoryName={currentRoom.categoryName}
-        categoryImageUrl={currentRoom.categoryImageUrl}
         onHangUp={handleLeaveRoom} 
       />
       <div className="room-main-content">
@@ -204,22 +148,15 @@ const RoomPage = () => {
             <div className="username-display">{user?.username} (Me)</div>
           </div>
 
-          {/* Remote Participants */}
-          {participants
-            .filter(p => p.id !== user.id) // Exclude the local user
-            .map(p => {
-              const streamInfo = remoteStreams[p.id];
-              const isParticipantMuted = streamInfo ? streamInfo.isMuted : false;
-              return (
-                <ParticipantMedia 
-                  key={p.id} 
-                  participant={p} 
-                  profile={profiles[p.id]} 
-                  isSpeaking={speakingState[p.id] || false}
-                  isMuted={isParticipantMuted}
-                />
-              );
-            })}
+          {/* Remote Participants from the unified state */}
+          {Object.values(participants)
+            .filter(p => p.user) // Filter out participants without user info
+            .map(p => (
+              <ParticipantMedia 
+                key={p.user.id} 
+                participant={p} 
+              />
+            ))}
         </div>
         <div className="call-controls-bar">
           <Button onClick={handleToggleMute} size="small">

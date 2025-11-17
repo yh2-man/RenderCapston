@@ -6,6 +6,7 @@ class WebSocketServer {
     constructor() {
         this.wss = null;
         this.rooms = new Map();
+        this.userRoomMap = new Map(); // New map to track userId -> roomId
     }
 
     start(server) {
@@ -28,7 +29,7 @@ class WebSocketServer {
         console.log('Client connected.');
 
         ws.on('message', (message) => {
-            dispatchMessage(ws, message, this.wss, this.rooms);
+            dispatchMessage(ws, message, this.wss, this.rooms, this.userRoomMap); // Pass userRoomMap
         });
 
         ws.on('close', () => {
@@ -41,34 +42,74 @@ class WebSocketServer {
     }
 
     async handleClose(ws) {
-        console.log('Client disconnected.');
-        if (ws.roomId) {
-            const room = this.rooms.get(ws.roomId);
-            if (room) {
-                room.delete(ws);
-                if (room.size === 0) {
-                    this.rooms.delete(ws.roomId);
-                    console.log(`Room ${ws.roomId} is empty. Deleting from memory and DB.`);
-                    try {
-                        // Note: This assumes you have a method in your Db module to handle this
-                        await db.query('DELETE FROM rooms WHERE id = $1', [ws.roomId]);
-                        console.log(`Room ${ws.roomId} deleted from database.`);
-                    } catch (error) {
-                        console.error(`Failed to delete room ${ws.roomId} from database:`, error);
-                    }
-                } else {
-                    // Notify remaining clients
-                    room.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(JSON.stringify({
-                                type: 'user-left',
-                                payload: { userId: ws.userId }
-                            }));
-                        }
-                    });
-                }
+        const userId = ws.userId;
+        let roomId = null;
+        let room = null;
+
+        // Find the room the user was in by iterating through all rooms.
+        // This is more robust than relying on potentially stale ws properties.
+        for (const [currentRoomId, currentRoomSet] of this.rooms.entries()) {
+            if (currentRoomSet.has(ws)) {
+                roomId = currentRoomId;
+                room = currentRoomSet;
+                break;
             }
         }
+
+        console.log(`Client disconnected (userId: ${userId}, roomId: ${roomId}). Handling leave...`);
+
+        if (!roomId || !userId || !room) {
+            // User was not in any room, no action needed.
+            return;
+        }
+
+        // --- Start of Unified Leave Logic (from handleLeaveRoom) ---
+        
+        // Remove the client from the room Set and the user-to-room map
+        room.delete(ws);
+        this.userRoomMap.delete(userId);
+        console.log(`User ${userId} left room ${roomId}. Remaining participants: ${room.size}`);
+
+        // Notify remaining clients in the same room
+        room.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type: 'user-left', payload: { userId } }));
+            }
+        });
+
+        // If the room is now empty, remove it from memory and DB
+        if (room.size === 0) {
+            console.log(`[DEBUG] Room ${roomId} is empty. Deleting from memory and DB.`);
+            this.rooms.delete(roomId);
+            try {
+                // Only delete group rooms from DB when empty.
+                const roomDetailsResult = await db.query('SELECT room_type FROM rooms WHERE id = $1', [roomId]);
+                if (roomDetailsResult.rows[0]?.room_type === 'group') {
+                    await db.query('DELETE FROM rooms WHERE id = $1', [roomId]);
+                    // No need to broadcast room-deleted, as no one is in the lobby in this context
+                }
+            } catch (error) {
+                console.error(`[DEBUG] Failed to delete room ${roomId} from DB:`, error);
+            }
+        } else { // Room still has participants, check for host migration
+            const roomDbResult = await db.query('SELECT host_id FROM rooms WHERE id = $1', [roomId]);
+            if (roomDbResult.rows[0]?.host_id === userId) {
+                // The host left, elect a new one
+                const newHostWs = Array.from(room)[0]; // Elect the first remaining participant
+                const newHostId = newHostWs.userId;
+
+                await db.query('UPDATE rooms SET host_id = $1 WHERE id = $2', [newHostId, roomId]);
+                console.log(`[DEBUG] Room ${roomId}: Host changed from ${userId} to ${newHostId}.`);
+
+                // Notify all remaining clients about the new host
+                room.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({ type: 'host-changed', payload: { newHostId } }));
+                    }
+                });
+            }
+        }
+        // --- End of Unified Leave Logic ---
     }
 }
 

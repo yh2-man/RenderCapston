@@ -3,12 +3,14 @@
  * Manages the creation and negotiation of the connection.
  */
 export class Connection {
-    constructor(localId, remoteId, sendMessage, rtcConfig) {
+    constructor(localId, remoteId, sendMessage, rtcConfig, onDataMessage) {
         this.localId = localId;
         this.remoteId = remoteId;
         this.sendMessage = sendMessage;
         this.peerConnection = new RTCPeerConnection(rtcConfig);
         this.audioSender = null; // To store the RTCRtpSender for the audio track
+        this.dataChannel = null;
+        this.onDataMessage = onDataMessage;
 
         this.peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
@@ -21,6 +23,35 @@ export class Connection {
                 });
             }
         };
+
+        // Handle data channel created by the remote peer
+        this.peerConnection.ondatachannel = (event) => {
+            console.log(`[Connection] Received data channel "${event.channel.label}" from ${this.remoteId}`);
+            this.dataChannel = event.channel;
+            this.dataChannel.onmessage = (e) => {
+                if (this.onDataMessage) {
+                    this.onDataMessage(JSON.parse(e.data));
+                }
+            };
+        };
+    }
+
+    createDataChannel(label) {
+        if (this.dataChannel) return;
+        console.log(`[Connection] Creating data channel "${label}" to ${this.remoteId}`);
+        this.dataChannel = this.peerConnection.createDataChannel(label);
+        this.dataChannel.onmessage = (event) => {
+            if (this.onDataMessage) {
+                this.onDataMessage(JSON.parse(event.data));
+            }
+        };
+        // Note: onopen/onclose handlers can be added here for debugging if needed
+    }
+
+    sendData(data) {
+        if (this.dataChannel && this.dataChannel.readyState === 'open') {
+            this.dataChannel.send(JSON.stringify(data));
+        }
     }
 
     addTrack(track, stream) {
