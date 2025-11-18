@@ -6,7 +6,9 @@ const dbConfig = {
     database: process.env.DB_NAME || 'voice_chat',
     password: process.env.DB_PASSWORD || 'gkak1021',
     port: process.env.DB_PORT || 5432,
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: {
+        rejectUnauthorized: false
+    },
 };
 
 const pool = new Pool(dbConfig);
